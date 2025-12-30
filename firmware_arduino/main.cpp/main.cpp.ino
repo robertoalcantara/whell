@@ -9,6 +9,8 @@
 #include "globals.h"
 #include "leds.c"
 #include <Joystick.h>
+#include <string.h>
+#include <stdlib.h>
 
 // Create the Joystick
 Joystick_ Joystick;
@@ -181,9 +183,14 @@ char btn_analog2digital( unsigned int value ) {
 #define QTD_ANALOG_BTN_PER_SET 6
 #define BTN_DIGITAL_NUM QTD_DIGITAL_INPUT + 3*QTD_DIGITAL_POS_SWITCH + 2*QTD_ANALOG_BTN_PER_SET
 #define JOY_BTN_MAX 32
+#define SERIAL_BUF_LEN 32
+#define DEBUG_BTN_LOG 0
 
 boolean btn_digital [ BTN_DIGITAL_NUM ];
 boolean btn_digital_prev [ BTN_DIGITAL_NUM ];
+boolean led_serial_override = false; /* when true, LEDs follow serial commands (SimHub) */
+char serial_buf[SERIAL_BUF_LEN];
+unsigned char serial_buf_pos = 0;
 
 /* Joystick button map (source index in btn_digital -> joystick button id)
    Priority: discrete buttons, analog sets (PF5/PF7), then 5 positions of each rotary */
@@ -205,6 +212,57 @@ void joystick_sync() {
       state = btn_digital[src];
     }
     Joystick.setButton(btn_id, state);
+  }
+}
+
+/* Serial protocol for LEDs (ASCII, SimHub friendly)
+   Commands ended by '\n':
+   - L,<idx>,<color>   idx:0-23, color:0=OFF,1=RED,2=GREEN,3=BLUE,4=YELLOW,5=PURPLE,6=CYAN
+   - C                 clear all leds (off)
+   - D                 disable override (return to demo mode)
+*/
+void process_serial_line(char *line) {
+  if (line[0] == 'L') {
+    char *p = strchr(line, ',');
+    if (!p) return;
+    unsigned char idx = atoi(p + 1);
+    p = strchr(p + 1, ',');
+    if (!p) return;
+    unsigned char color = atoi(p + 1);
+    if (idx < NUM_LEDS && color <= CYAN) {
+      if (color == OFF) {
+        leds[idx].enabled = false;
+      } else {
+        leds[idx].enabled = true;
+        leds[idx].color = color;
+      }
+      led_serial_override = true;
+    }
+  } else if (line[0] == 'C') {
+    for (unsigned char i = 0; i < NUM_LEDS; i++) {
+      leds[i].enabled = false;
+    }
+    led_serial_override = true;
+  } else if (line[0] == 'D') {
+    led_serial_override = false;
+  }
+}
+
+void serial_led_tick() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      serial_buf[serial_buf_pos] = '\0';
+      process_serial_line(serial_buf);
+      serial_buf_pos = 0;
+    } else {
+      if (serial_buf_pos < (SERIAL_BUF_LEN - 1)) {
+        serial_buf[serial_buf_pos++] = c;
+      } else {
+        serial_buf_pos = 0; /* overflow, reset */
+      }
+    }
   }
 }
 
@@ -238,6 +296,7 @@ void btn_tick() {
   }
   
   for (unsigned char cnt=0; cnt<BTN_DIGITAL_NUM; cnt++) {
+#if DEBUG_BTN_LOG
     if ( btn_digital_prev[cnt] != btn_digital[cnt] ) {
       /* value change */
       Serial.println("");
@@ -246,6 +305,7 @@ void btn_tick() {
       Serial.print(" = ");
       Serial.print( btn_digital[cnt] );
     }
+#endif
     btn_digital_prev[cnt] = btn_digital[cnt];
 
 
@@ -260,16 +320,19 @@ void loop() {
   static unsigned char teste=0; //board test  aux
   static unsigned char teste_aux = 0;// board test aux
 
-  /* PCB test */
-  led_update_percent( 1 );
+  serial_led_tick(); /* handle SimHub serial commands for LEDs */
 
-  if ( global_timer.flags.flag.on1s ) {
-    led_update_aux( teste_aux );
-    if ( teste_aux == 0 ) 
-      teste_aux = 1;
-    else
-      teste_aux = 0;
-  } 
+  /* PCB test */
+  if ( false == led_serial_override ) {
+    led_update_percent( 1 );
+    if ( global_timer.flags.flag.on1s ) {
+      led_update_aux( teste_aux );
+      if ( teste_aux == 0 ) 
+        teste_aux = 1;
+      else
+        teste_aux = 0;
+    } 
+  }
 
  /* ** */
   if ( 1 == global_timer.flags.flag.on512us ) {
