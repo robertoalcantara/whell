@@ -180,9 +180,33 @@ char btn_analog2digital( unsigned int value ) {
 #define QTD_DIGITAL_INPUT 3
 #define QTD_ANALOG_BTN_PER_SET 6
 #define BTN_DIGITAL_NUM QTD_DIGITAL_INPUT + 3*QTD_DIGITAL_POS_SWITCH + 2*QTD_ANALOG_BTN_PER_SET
+#define JOY_BTN_MAX 32
 
 boolean btn_digital [ BTN_DIGITAL_NUM ];
 boolean btn_digital_prev [ BTN_DIGITAL_NUM ];
+
+/* Joystick button map (source index in btn_digital -> joystick button id)
+   Priority: discrete buttons, analog sets (PF5/PF7), then 5 positions of each rotary */
+const unsigned char joystick_map[JOY_BTN_MAX] = {
+  0, 1, 2,                 /* digital inputs */
+  39, 40, 41, 42, 43, 44,  /* BTN_SET1 (PF5) */
+  45, 46, 47, 48, 49, 50,  /* BTN_SET2 (PF7) */
+  3, 4, 5, 6, 7,           /* Rotary1 first 5 */
+  15, 16, 17, 18, 19,      /* Rotary2 first 5 */
+  27, 28, 29, 30, 31,      /* Rotary3 first 5 */
+  0, 0                     /* spare slots mapped to btn 0 */
+};
+
+void joystick_sync() {
+  for (unsigned char btn_id = 0; btn_id < JOY_BTN_MAX; btn_id++) {
+    unsigned char src = joystick_map[btn_id];
+    boolean state = false;
+    if (src < BTN_DIGITAL_NUM) {
+      state = btn_digital[src];
+    }
+    Joystick.setButton(btn_id, state);
+  }
+}
 
 /* everything is a "button" on joystick. push-buttom, rotate switch and encoders 
    btn_digital array contains boolean state of each button 
@@ -208,7 +232,7 @@ void btn_tick() {
     btn_digital[ QTD_DIGITAL_INPUT + (3*QTD_DIGITAL_POS_SWITCH) + btn_set_analog ] = true;
   }
   
-  btn_set_analog = btn_analog2digital[dev_value[4]];
+  btn_set_analog = btn_analog2digital( dev_value[4] );
   if (  btn_set_analog >= 0 ) {
     btn_digital[ QTD_DIGITAL_INPUT + (3*QTD_DIGITAL_POS_SWITCH) + QTD_ANALOG_BTN_PER_SET + btn_set_analog ] = true;
   }
@@ -226,6 +250,7 @@ void btn_tick() {
 
 
   }
+  joystick_sync();
   
 }
 
@@ -263,10 +288,6 @@ void loop() {
     btn_tick();
   }
 
-  if ( 1 == global_timer.flags.flag.on1s ) {
-    Joystick.setButton(0, 1);
-  }
-    
   global_timer.flags.all = 0;
   while ( global_timer.flags.flag.on512us == 0 ) { /* just wait dude ! */ }
 }
