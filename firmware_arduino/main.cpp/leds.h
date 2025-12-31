@@ -13,7 +13,7 @@
    *  SHCP - SRCLK  - shift register clock 
    *  STCP - RCLK - storage register clock
    */
-  #define NUM_LEDS 24 //20 wired
+  #define NUM_LEDS 24 //20 wired, 24 shift outputs
   #define OFF 0
   #define RED 1
   #define GREEN 2

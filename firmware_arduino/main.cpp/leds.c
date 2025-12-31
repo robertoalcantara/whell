@@ -58,12 +58,25 @@ void led_update_aux( unsigned char value ) {
 
 
 void led_tick( ) {
-  static unsigned char led_cnt = 0;
-  
-  led_scan_update( led_cnt ); 
-  led_cnt++;
-  if (led_cnt > 19) {
-    led_cnt = 0;
+  /* Only ONE LED should ever be enabled at a time (hardware brightness constraint).
+     For best duty-cycle, scan only the active LED instead of cycling through all outputs. */
+  signed char active = -1;
+  for (unsigned char i = 0; i < NUM_LEDS; i++) {
+    if (leds[i].enabled) {
+      if (active < 0) {
+        active = (signed char)i;
+      } else {
+        /* enforce single-enabled */
+        leds[i].enabled = false;
+      }
+    }
+  }
+
+  if (active < 0) {
+    /* nothing active -> keep outputs off */
+    led_scan_update(0);
+  } else {
+    led_scan_update((unsigned char)active);
   }
 }
 

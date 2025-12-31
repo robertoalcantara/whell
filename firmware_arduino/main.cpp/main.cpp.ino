@@ -18,6 +18,9 @@ Joystick_ Joystick;
 
 volatile T_GLOBAL_TIMER global_timer;
 
+/* Hardware uses 24 shift-register outputs, but only 20 LEDs are physically wired */
+#define WIRED_LEDS 20
+
 void setup() {
 
   DDRB = B00001110; 
@@ -44,7 +47,11 @@ void setup() {
 
   Serial.begin(9600);
   Joystick.begin();
-  led_scan_update( 21 ); // non wired led, just to cleanup any data on latches
+  /* start with all LEDs off (no demo) */
+  for (unsigned char i = 0; i < NUM_LEDS; i++) {
+    leds[i].enabled = false;
+  }
+  led_scan_update( 0 ); // cleanup any data on latches
 }
 
 
@@ -240,10 +247,12 @@ void process_serial_line(char *line) {
     p = strchr(p + 1, ',');
     if (!p) return;
     unsigned char color = atoi(p + 1);
-    if (idx < NUM_LEDS && color <= CYAN) {
-      if (color == OFF) {
-        leds[idx].enabled = false;
-      } else {
+    if (idx < WIRED_LEDS && color <= CYAN) {
+      /* Hardware constraint: only ONE led can be enabled at a time */
+      for (unsigned char i = 0; i < NUM_LEDS; i++) {
+        leds[i].enabled = false;
+      }
+      if (color != OFF) {
         leds[idx].enabled = true;
         leds[idx].color = color;
       }
@@ -256,6 +265,10 @@ void process_serial_line(char *line) {
     led_serial_override = true;
   } else if (line[0] == 'D') {
     led_serial_override = false;
+    /* demo removed: use D as a safe "stop/clear" */
+    for (unsigned char i = 0; i < NUM_LEDS; i++) {
+      leds[i].enabled = false;
+    }
   }
 }
 
@@ -393,33 +406,15 @@ void btn_tick() {
 
 
 void loop() {
-  static unsigned char teste=0; //board test  aux
-  static unsigned char teste_aux = 0;// board test aux
-  static unsigned char demo_led_idx = 0;
-
   serial_led_tick(); /* handle SimHub serial commands for LEDs */
-
-  /* PCB test */
-  if ( false == led_serial_override ) {
-    /* Demo: walk a single RED led in sequence */
-    if ( global_timer.flags.flag.on100ms ) {
-      for (unsigned char i = 0; i < NUM_LEDS; i++) {
-        leds[i].enabled = false;
-      }
-      leds[demo_led_idx].enabled = true;
-      leds[demo_led_idx].color = RED;
-
-      demo_led_idx++;
-      if (demo_led_idx >= NUM_LEDS) demo_led_idx = 0;
-    }
-  }
 
  /* ** */
   if ( 1 == global_timer.flags.flag.on512us ) {
     analog_tick();
   }
 
-  if ( 1 == global_timer.flags.flag.on512us ) {
+  /* LED scan at 1kHz to reduce flicker while keeping decent duty cycle */
+  if ( 1 == global_timer.flags.flag.on1ms ) {
     led_tick();
   }
 
