@@ -1,7 +1,8 @@
 /* 
  * File:   globals.h
  * Author: robertoalcantara
- * 
+ *2
+ * https://github.com/MHeironimus/ArduinoJoystickLibrary
  * Just for fun. Do whatever u want.
 */
 
@@ -166,10 +167,15 @@ char switch_analog2digital( unsigned int value ) {
   return(11);
 }
 
-/* 6 buttons wired to ADC */
-const unsigned int btn_limits[] = { 435, 472, 509, 530, 543, 544 };
+/* Buttons wired to ADC (resistor ladder).
+   SET1 design target (Rpullup=10k to VCC; each button connects a resistor to GND):
+     BTN1..BTN7: 1k2, 2k7, 4k7, 8k2, 12k, 20k, 47k
+   Expected ADC codes (approx): 110, 217, 327, 461, 558, 682, 843
+   Use wide mid-point thresholds to avoid noisy/ambiguous regions.
+*/
+const unsigned int btn_limits[] = { 163, 272, 394, 510, 620, 762, 930 };
 char btn_analog2digital( unsigned int value ) {  
-  for (char aux=0; aux<6; aux++) {
+  for (char aux=0; aux<7; aux++) {
     if ( value < btn_limits[aux] ) { 
       return (aux);
     }
@@ -180,11 +186,16 @@ char btn_analog2digital( unsigned int value ) {
 
 #define QTD_DIGITAL_POS_SWITCH 12
 #define QTD_DIGITAL_INPUT 3
-#define QTD_ANALOG_BTN_PER_SET 6
-#define BTN_DIGITAL_NUM QTD_DIGITAL_INPUT + 3*QTD_DIGITAL_POS_SWITCH + 2*QTD_ANALOG_BTN_PER_SET
+#define QTD_ANALOG_BTN_SET1 7
+#define QTD_ANALOG_BTN_SET2 0  /* inactive for now */
+#define BTN_DIGITAL_NUM QTD_DIGITAL_INPUT + 3*QTD_DIGITAL_POS_SWITCH + QTD_ANALOG_BTN_SET1 + QTD_ANALOG_BTN_SET2
 #define JOY_BTN_MAX 32
 #define SERIAL_BUF_LEN 32
-#define DEBUG_BTN_LOG 0
+#define DEBUG_BTN_LOG 1
+
+/* Analog button sets filtering */
+#define ANALOG_SET_DEBOUNCE_SAMPLES 3   /* 3 * 10ms = 30ms */
+#define ANALOG_SET_LOCKOUT_MS 50        /* require 50ms after all-off before next press */
 
 boolean btn_digital [ BTN_DIGITAL_NUM ];
 boolean btn_digital_prev [ BTN_DIGITAL_NUM ];
@@ -196,12 +207,12 @@ unsigned char serial_buf_pos = 0;
    Priority: discrete buttons, analog sets (PF5/PF7), then 5 positions of each rotary */
 const unsigned char joystick_map[JOY_BTN_MAX] = {
   0, 1, 2,                 /* digital inputs */
-  39, 40, 41, 42, 43, 44,  /* BTN_SET1 (PF5) */
-  45, 46, 47, 48, 49, 50,  /* BTN_SET2 (PF7) */
+  39, 40, 41, 42, 43, 44, 45,  /* BTN_SET1 (PF5) - 7 buttons */
+  0, 0, 0, 0, 0, 0,            /* BTN_SET2 (PF7) - inactive */
   3, 4, 5, 6, 7,           /* Rotary1 first 5 */
   15, 16, 17, 18, 19,      /* Rotary2 first 5 */
   27, 28, 29, 30, 31,      /* Rotary3 first 5 */
-  0, 0                     /* spare slots mapped to btn 0 */
+  0                        /* spare slot mapped to btn 0 */
 };
 
 void joystick_sync() {
@@ -285,14 +296,79 @@ void btn_tick() {
   btn_digital[ QTD_DIGITAL_INPUT + (2*QTD_DIGITAL_POS_SWITCH) + switch_analog2digital(dev_value[2]) ] = true;
 
   /* Analog Input Buttons */
-  char btn_set_analog = btn_analog2digital( dev_value[3] );
-    if (  btn_set_analog >= 0 ) {
-    btn_digital[ QTD_DIGITAL_INPUT + (3*QTD_DIGITAL_POS_SWITCH) + btn_set_analog ] = true;
-  }
-  
-  btn_set_analog = btn_analog2digital( dev_value[4] );
-  if (  btn_set_analog >= 0 ) {
-    btn_digital[ QTD_DIGITAL_INPUT + (3*QTD_DIGITAL_POS_SWITCH) + QTD_ANALOG_BTN_PER_SET + btn_set_analog ] = true;
+  /* BTN_SET1 (dev_value[3]) only (SET2 inactive for now)
+     Requirements:
+     - enforce >=50ms between detections on same set
+     - only detect a new button when ALL are off (released) */
+  {
+    /* SET1 state */
+    static char set1_stable_btn = -1;          /* current reported button (0..6) or -1 */
+    static char set1_candidate_btn = -1;       /* debounce candidate */
+    static unsigned char set1_candidate_cnt = 0;
+    static unsigned long set1_lockout_until_ms = 0;
+
+    const unsigned long now = millis();
+    const unsigned int adc_set1 = (unsigned int)dev_value[3];
+    const unsigned char set1_base_idx = (unsigned char)(QTD_DIGITAL_INPUT + (3 * QTD_DIGITAL_POS_SWITCH));
+
+    /* Debounce the decoded button id */
+    char decoded = btn_analog2digital(adc_set1);
+    if (decoded == set1_candidate_btn) {
+      if (set1_candidate_cnt < 255) set1_candidate_cnt++;
+    } else {
+      set1_candidate_btn = decoded;
+      set1_candidate_cnt = 1;
+    }
+
+    char debounced = set1_stable_btn;
+    if (set1_candidate_cnt >= ANALOG_SET_DEBOUNCE_SAMPLES) {
+      debounced = set1_candidate_btn;
+    }
+
+    /* State machine: allow only one button until all-off, and enforce lockout after release */
+    if (set1_stable_btn < 0) {
+      /* currently all-off */
+      if (now >= set1_lockout_until_ms) {
+        if (debounced >= 0) {
+          set1_stable_btn = debounced; /* latch first detected button */
+        }
+      } else {
+        /* still in lockout -> force all-off */
+        set1_stable_btn = -1;
+      }
+    } else {
+      /* currently latched to a button; ignore other decoded values until all-off */
+      if (debounced < 0) {
+        set1_stable_btn = -1;
+        set1_lockout_until_ms = now + ANALOG_SET_LOCKOUT_MS;
+      }
+    }
+
+    /* Apply to btn_digital[] (exactly one for SET1, or none) */
+    for (unsigned char b = 0; b < QTD_ANALOG_BTN_SET1; b++) {
+      btn_digital[set1_base_idx + b] = false;
+    }
+    if (set1_stable_btn >= 0 && set1_stable_btn < QTD_ANALOG_BTN_SET1) {
+      btn_digital[set1_base_idx + (unsigned char)set1_stable_btn] = true;
+    }
+
+#if DEBUG_BTN_LOG
+    /* Helpful debug */
+    static unsigned char dbg_div = 0;
+    dbg_div++;
+    if (dbg_div >= 50) { /* ~500ms (btn_tick every 10ms) */
+      dbg_div = 0;
+      Serial.println("");
+      Serial.print("ADC_SET1=");
+      Serial.print(adc_set1);
+      Serial.print(" ADC_SET2=");
+      Serial.print((unsigned int)dev_value[4]);
+      Serial.print(" ST1=");
+      Serial.print((int)set1_stable_btn);
+      Serial.print(" ST2=");
+      Serial.print(-1);
+    }
+#endif
   }
   
   for (unsigned char cnt=0; cnt<BTN_DIGITAL_NUM; cnt++) {
@@ -319,19 +395,23 @@ void btn_tick() {
 void loop() {
   static unsigned char teste=0; //board test  aux
   static unsigned char teste_aux = 0;// board test aux
+  static unsigned char demo_led_idx = 0;
 
   serial_led_tick(); /* handle SimHub serial commands for LEDs */
 
   /* PCB test */
   if ( false == led_serial_override ) {
-    led_update_percent( 1 );
-    if ( global_timer.flags.flag.on1s ) {
-      led_update_aux( teste_aux );
-      if ( teste_aux == 0 ) 
-        teste_aux = 1;
-      else
-        teste_aux = 0;
-    } 
+    /* Demo: walk a single RED led in sequence */
+    if ( global_timer.flags.flag.on100ms ) {
+      for (unsigned char i = 0; i < NUM_LEDS; i++) {
+        leds[i].enabled = false;
+      }
+      leds[demo_led_idx].enabled = true;
+      leds[demo_led_idx].color = RED;
+
+      demo_led_idx++;
+      if (demo_led_idx >= NUM_LEDS) demo_led_idx = 0;
+    }
   }
 
  /* ** */
