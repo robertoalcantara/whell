@@ -18,9 +18,6 @@ Joystick_ Joystick;
 
 volatile T_GLOBAL_TIMER global_timer;
 
-/* Hardware uses 24 shift-register outputs, but only 20 LEDs are physically wired */
-#define WIRED_LEDS 20
-
 void setup() {
 
   DDRB = B00001110; 
@@ -51,7 +48,7 @@ void setup() {
   for (unsigned char i = 0; i < NUM_LEDS; i++) {
     leds[i].enabled = false;
   }
-  led_scan_update( 0 ); // cleanup any data on latches
+  led_scan_update_color( OFF ); // cleanup any data on latches
 }
 
 
@@ -236,6 +233,7 @@ void joystick_sync() {
 /* Serial protocol for LEDs (ASCII, SimHub friendly)
    Commands ended by '\n':
    - L,<idx>,<color>   idx:0-23, color:0=OFF,1=RED,2=GREEN,3=BLUE,4=YELLOW,5=PURPLE,6=CYAN
+   - A,<color>         set ALL wired leds to color (0=OFF clears all)
    - C                 clear all leds (off)
    - D                 disable override (return to demo mode)
 */
@@ -248,16 +246,30 @@ void process_serial_line(char *line) {
     if (!p) return;
     unsigned char color = atoi(p + 1);
     if (idx < WIRED_LEDS && color <= CYAN) {
-      /* Hardware constraint: only ONE led can be enabled at a time */
-      for (unsigned char i = 0; i < NUM_LEDS; i++) {
-        leds[i].enabled = false;
-      }
-      if (color != OFF) {
+      /* Multi-led state is allowed; scan will multiplex (only one ON at a time in hardware) */
+      if (color == OFF) {
+        leds[idx].enabled = false;
+      } else {
         leds[idx].enabled = true;
         leds[idx].color = color;
       }
       led_serial_override = true;
     }
+  } else if (line[0] == 'A') {
+    /* All LEDs test */
+    char *p = strchr(line, ',');
+    if (!p) return;
+    unsigned char color = atoi(p + 1);
+    if (color > CYAN) return;
+    for (unsigned char i = 0; i < WIRED_LEDS; i++) {
+      if (color == OFF) {
+        leds[i].enabled = false;
+      } else {
+        leds[i].enabled = true;
+        leds[i].color = color;
+      }
+    }
+    led_serial_override = true;
   } else if (line[0] == 'C') {
     for (unsigned char i = 0; i < NUM_LEDS; i++) {
       leds[i].enabled = false;
@@ -413,7 +425,7 @@ void loop() {
     analog_tick();
   }
 
-  /* LED scan at 1kHz to reduce flicker while keeping decent duty cycle */
+  /* LED scan at 1kHz (dwell handled inside led_tick) */
   if ( 1 == global_timer.flags.flag.on1ms ) {
     led_tick();
   }

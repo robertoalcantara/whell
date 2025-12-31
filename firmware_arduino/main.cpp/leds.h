@@ -14,6 +14,10 @@
    *  STCP - RCLK - storage register clock
    */
   #define NUM_LEDS 24 //20 wired, 24 shift outputs
+  #define WIRED_LEDS 20
+
+  /* Multiplex dwell time: keep the selected LED latched for this long before moving on. */
+  #define LED_DWELL_MS 5
   #define OFF 0
   #define RED 1
   #define GREEN 2
@@ -48,6 +52,7 @@
   extern T_LED leds[NUM_LEDS];
   
   void led_scan_update( unsigned char led_num );
+  void led_scan_update_color( unsigned char color );
   void led_tick( );
   
 #endif

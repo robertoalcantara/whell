@@ -58,26 +58,112 @@ void led_update_aux( unsigned char value ) {
 
 
 void led_tick( ) {
-  /* Only ONE LED should ever be enabled at a time (hardware brightness constraint).
-     For best duty-cycle, scan only the active LED instead of cycling through all outputs. */
-  signed char active = -1;
-  for (unsigned char i = 0; i < NUM_LEDS; i++) {
-    if (leds[i].enabled) {
-      if (active < 0) {
-        active = (signed char)i;
-      } else {
-        /* enforce single-enabled */
-        leds[i].enabled = false;
-      }
+  /* Multiplex scan by COLOR:
+     - In one scan slot we can light MULTIPLE LEDs at once, as long as they share the same color
+       (because color lines are global).
+     - If multiple colors are enabled, we time-multiplex between colors.
+  */
+  static unsigned char dwell_ms = 0;
+  static unsigned char current_color = OFF; /* OFF means "nothing latched" */
+
+  /* Determine which colors are currently used */
+  boolean color_used[CYAN + 1];
+  for (unsigned char c = 0; c <= CYAN; c++) color_used[c] = false;
+
+  unsigned char any_enabled = 0;
+  for (unsigned char i = 0; i < WIRED_LEDS; i++) {
+    if (leds[i].enabled && leds[i].color >= RED && leds[i].color <= CYAN) {
+      color_used[leds[i].color] = true;
+      any_enabled = 1;
     }
   }
 
-  if (active < 0) {
-    /* nothing active -> keep outputs off */
-    led_scan_update(0);
-  } else {
-    led_scan_update((unsigned char)active);
+  if (!any_enabled) {
+    current_color = OFF;
+    dwell_ms = 0;
+    led_scan_update_color(OFF);
+    return;
   }
+
+  /* If the current color is still used, keep it latched for LED_DWELL_MS */
+  if (current_color != OFF && color_used[current_color]) {
+    if (dwell_ms < LED_DWELL_MS) {
+      dwell_ms++;
+      return;
+    }
+  }
+  dwell_ms = 0;
+
+  /* Pick next used color (round-robin) */
+  unsigned char next_color = OFF;
+  for (unsigned char step = 0; step < CYAN; step++) {
+    current_color++;
+    if (current_color > CYAN) current_color = RED;
+    if (color_used[current_color]) {
+      next_color = current_color;
+      break;
+    }
+  }
+  if (next_color == OFF) {
+    current_color = OFF;
+    led_scan_update_color(OFF);
+  } else {
+    current_color = next_color;
+    led_scan_update_color(current_color);
+  }
+}
+
+void led_scan_update_color( unsigned char color ) {
+
+  DATA_DOWN;
+  STCP_DOWN;
+  SHCP_DOWN;
+
+  /* default: all colors off */
+  PORTD = PORTD | B01110000; //OFF
+
+  switch ( color ) {
+    case BLUE:
+        PORTD = PORTD & BLUE_MASK;
+        break;
+    case RED:
+        PORTD = PORTD & RED_MASK;
+        break;
+    case GREEN:
+        PORTD = PORTD & GREEN_MASK;
+        break;
+    case YELLOW:
+        PORTD = PORTD & GREEN_MASK & RED_MASK;
+        break;
+    case PURPLE:
+        PORTD = PORTD & BLUE_MASK & RED_MASK;
+        break;
+    case CYAN:
+        PORTD = PORTD & BLUE_MASK & GREEN_MASK;
+        break;
+    default:
+      /* OFF */
+      PORTD = PORTD | B01110000;
+  }
+
+  for ( char shifter_cnt=NUM_LEDS-1; shifter_cnt>=0; shifter_cnt--) {
+
+      boolean on = false;
+      if (shifter_cnt < WIRED_LEDS) {
+        on = (leds[(unsigned char)shifter_cnt].enabled) && (leds[(unsigned char)shifter_cnt].color == color) && (color != OFF);
+      }
+
+      if ( on ) {
+        DATA_UP;
+      } else {
+        DATA_DOWN;
+      }
+
+      SHCP_UP;
+      SHCP_DOWN;
+      delayMicroseconds(1);
+  }
+  STCP_UP;
 }
 
 
