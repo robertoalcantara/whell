@@ -88,30 +88,77 @@ ISR(TIMER1_COMPA_vect) {
 #define NUM_SAMPLES 16
 #define ANALOG_MULTI_QTY 5
 unsigned long dev_value[ANALOG_MULTI_QTY];
+/* Keep last raw ADC reads for fast-reacting inputs (resistor ladders). */
+static unsigned int adc_last_set1 = 1023;
+static unsigned int adc_last_set2 = 1023;
+/* SET1 may intentionally reach 0 (button wired to GND).
+   To avoid single-sample "0" artifacts, only accept low values after N consecutive lows. */
+#define ADC_SET1_LOW_CONFIRM_SAMPLES 2U
+static unsigned int adc_set1_low_cnt = 0;
+static unsigned int adc_set1_glitch_cnt = 0; /* counts rejected first low samples */
 void analog_tick() {
   
   static unsigned long dev_acum[ANALOG_MULTI_QTY];
   static unsigned char sample_cnt;
   static unsigned char current_device;
+  static boolean adc_settle_phase = true; /* true=dummy read after channel switch, false=valid read */
     
-  switch ( current_device ) {
-    case 0: dev_acum[ 0 ]  += analogRead(5); /*blocking ~100us SW1 */
-            break;
-    case 1: dev_acum[ 1 ]  += analogRead(4); /*blocking ~100us SW2*/
-            break;
-    case 2: dev_acum[ 2 ]  += analogRead(3); /*blocking ~100us SW3*/
-            break;
-    case 3: dev_acum[ 3 ]  += analogRead(2); /*blocking ~100us Btn1-7*/
-            break;
-    case 4: dev_acum[ 4 ]  += analogRead(0); /*blocking ~100us Btn8-12*/
-            sample_cnt++;
-            break;
-  }  
-  
-  if ( current_device == ANALOG_MULTI_QTY-1) {
-    current_device = 0;
+  /* ADC mux settling:
+     With high-impedance sources (resistor ladders), the first conversion after switching channels
+     can be biased by the previous channel (ADC sample/hold capacitor). We do a dummy read on the
+     new channel, then a valid read on the next tick. This halves the effective sample rate but
+     greatly improves stability.
+  */
+  if (adc_settle_phase) {
+    /* Dummy read: discard */
+    switch ( current_device ) {
+      case 0: (void)analogRead(5); break; /* SW1 */
+      case 1: (void)analogRead(4); break; /* SW2 */
+      case 2: (void)analogRead(3); break; /* SW3 */
+      case 3: (void)analogRead(2); break; /* Btn1-7 (SET1) */
+      case 4: (void)analogRead(0); break; /* Btn8-12 */
+    }
+    adc_settle_phase = false;
   } else {
-    current_device++;
+    /* Valid read: accumulate */
+    switch ( current_device ) {
+      case 0: dev_acum[ 0 ]  += analogRead(5); break; /* SW1 */
+      case 1: dev_acum[ 1 ]  += analogRead(4); break; /* SW2 */
+      case 2: dev_acum[ 2 ]  += analogRead(3); break; /* SW3 */
+      case 3: {
+              unsigned int v = (unsigned int)analogRead(2); /* Btn1-7 (SET1) */
+              /* Allow real 0, but reject the first low sample (often mux/S&H artifact). */
+              if (v <= 2U) {
+                if (adc_set1_low_cnt < 65535U) adc_set1_low_cnt++;
+                if (adc_set1_low_cnt >= ADC_SET1_LOW_CONFIRM_SAMPLES) {
+                  adc_last_set1 = v; /* accept as real */
+                } else {
+                  adc_set1_glitch_cnt++;
+                  v = adc_last_set1; /* reject first low */
+                }
+              } else {
+                adc_set1_low_cnt = 0;
+                adc_last_set1 = v;
+              }
+              dev_acum[ 3 ] += v;
+              break;
+            }
+      case 4: {
+              unsigned int v = (unsigned int)analogRead(0); /* Btn8-12 */
+              adc_last_set2 = v;
+              dev_acum[ 4 ] += v;
+              sample_cnt++;
+              break;
+            }
+    }
+    adc_settle_phase = true;
+
+    /* advance channel only after a valid read */
+    if ( current_device == ANALOG_MULTI_QTY-1) {
+      current_device = 0;
+    } else {
+      current_device++;
+    }
   }
   
   if (sample_cnt == NUM_SAMPLES) {
@@ -193,6 +240,39 @@ char btn_analog2digital( unsigned int value ) {
   return(-1);
 }
 
+/* More robust decode for resistor-ladder buttons (SET1).
+   Using nearest-center + explicit release threshold avoids "button drifting"
+   when ADC values sit near boundaries / noise.
+*/
+/* NOTE: keep this as a literal 7 to avoid dependency on later macros. */
+#define BTN_SET1_QTY 7
+/* Calibrate these centers to your real ADC values for each physical button.
+   If one SET1 button is wired to GND, set THAT button's center to 0.
+   Mapping: JoyBtn 3..9 correspond to SET1 indexes 0..6.
+   You confirmed the "ADC=0" button must be JoyBtn 8 (0-based ID=7) -> SET1 index 4,
+   so we put 0 at index 4 below (and restore the old value at index 5).
+*/
+static const unsigned int btn_centers_set1[BTN_SET1_QTY] = { 110, 217, 327, 461, 0, 682, 843 };
+#define BTN_SET1_RELEASE_MIN 980U   /* >= this means "no button pressed" (near VCC) */
+#define BTN_SET1_PRESS_TOL   70U    /* max distance from nearest center to accept a new press */
+static inline unsigned int uabs_diff_u16(unsigned int a, unsigned int b) {
+  return (a > b) ? (a - b) : (b - a);
+}
+static char btn_set1_decode(unsigned int adc_value) {
+  if (adc_value >= BTN_SET1_RELEASE_MIN) return -1;
+  unsigned int best_d = 0xFFFF;
+  char best_i = -1;
+  for (char i = 0; i < (char)BTN_SET1_QTY; i++) {
+    unsigned int d = uabs_diff_u16(adc_value, btn_centers_set1[(unsigned char)i]);
+    if (d < best_d) {
+      best_d = d;
+      best_i = i;
+    }
+  }
+  if (best_d <= BTN_SET1_PRESS_TOL) return best_i;
+  return -1; /* ambiguous region -> treat as released (will be filtered by state machine) */
+}
+
 
 #define QTD_DIGITAL_POS_SWITCH 12
 #define QTD_DIGITAL_INPUT 3
@@ -201,7 +281,7 @@ char btn_analog2digital( unsigned int value ) {
 #define BTN_DIGITAL_NUM QTD_DIGITAL_INPUT + 3*QTD_DIGITAL_POS_SWITCH + QTD_ANALOG_BTN_SET1 + QTD_ANALOG_BTN_SET2
 #define JOY_BTN_MAX 32
 #define SERIAL_BUF_LEN 32
-#define DEBUG_BTN_LOG 0
+#define DEBUG_BTN_LOG 1
 
 /* Analog button sets filtering */
 #define ANALOG_SET_DEBOUNCE_SAMPLES 3   /* 3 * 10ms = 30ms */
@@ -224,6 +304,13 @@ const unsigned char joystick_map[JOY_BTN_MAX] = {
   27, 28, 29, 30, 31,      /* Rotary3 first 5 */
   0                        /* spare slot mapped to btn 0 */
 };
+
+static char joystick_btn_from_src(unsigned char src_idx) {
+  for (unsigned char joy = 0; joy < JOY_BTN_MAX; joy++) {
+    if (joystick_map[joy] == src_idx) return (char)joy;
+  }
+  return -1;
+}
 
 void joystick_sync() {
   for (unsigned char btn_id = 0; btn_id < JOY_BTN_MAX; btn_id++) {
@@ -341,39 +428,39 @@ void btn_tick() {
     static unsigned long set1_lockout_until_ms = 0;
 
     const unsigned long now = millis();
-    const unsigned int adc_set1 = (unsigned int)dev_value[3];
+    /* IMPORTANT: use raw last ADC sample for SET1 to avoid "in-between" averages
+       (a 16-sample block average can land near other button centers during press/release). */
+    const unsigned int adc_set1 = adc_last_set1;
     const unsigned char set1_base_idx = (unsigned char)(QTD_DIGITAL_INPUT + (3 * QTD_DIGITAL_POS_SWITCH));
 
-    /* Debounce the decoded button id */
-    char decoded = btn_analog2digital(adc_set1);
-    if (decoded == set1_candidate_btn) {
-      if (set1_candidate_cnt < 255) set1_candidate_cnt++;
-    } else {
-      set1_candidate_btn = decoded;
-      set1_candidate_cnt = 1;
-    }
+    /* Decode using centers (stable), then debounce ONLY the press event.
+       While a button is latched, we only release when ADC is clearly "open" (near VCC). */
+    const char decoded = btn_set1_decode(adc_set1);
 
-    char debounced = set1_stable_btn;
-    if (set1_candidate_cnt >= ANALOG_SET_DEBOUNCE_SAMPLES) {
-      debounced = set1_candidate_btn;
-    }
-
-    /* State machine: allow only one button until all-off, and enforce lockout after release */
     if (set1_stable_btn < 0) {
-      /* currently all-off */
+      /* currently released */
+      if (decoded == set1_candidate_btn) {
+        if (set1_candidate_cnt < 255) set1_candidate_cnt++;
+      } else {
+        set1_candidate_btn = decoded;
+        set1_candidate_cnt = 1;
+      }
+
       if (now >= set1_lockout_until_ms) {
-        if (debounced >= 0) {
-          set1_stable_btn = debounced; /* latch first detected button */
+        if (set1_candidate_btn >= 0 && set1_candidate_cnt >= ANALOG_SET_DEBOUNCE_SAMPLES) {
+          set1_stable_btn = set1_candidate_btn; /* latch first detected button */
         }
       } else {
-        /* still in lockout -> force all-off */
+        /* still in lockout -> ignore */
         set1_stable_btn = -1;
       }
     } else {
-      /* currently latched to a button; ignore other decoded values until all-off */
-      if (debounced < 0) {
+      /* currently latched: ignore decoded changes; only release when clearly open */
+      if (adc_set1 >= BTN_SET1_RELEASE_MIN) {
         set1_stable_btn = -1;
         set1_lockout_until_ms = now + ANALOG_SET_LOCKOUT_MS;
+        set1_candidate_btn = -1;
+        set1_candidate_cnt = 0;
       }
     }
 
@@ -392,14 +479,53 @@ void btn_tick() {
     if (dbg_div >= 50) { /* ~500ms (btn_tick every 10ms) */
       dbg_div = 0;
       Serial.println("");
-      Serial.print("ADC_SET1=");
+      Serial.print("ADC_SET1_RAW=");
       Serial.print(adc_set1);
+      Serial.print(" ADC_SET1_AVG=");
+      Serial.print((unsigned int)dev_value[3]);
       Serial.print(" ADC_SET2=");
       Serial.print((unsigned int)dev_value[4]);
+      Serial.print(" G1=");
+      Serial.print((unsigned int)adc_set1_glitch_cnt);
+      Serial.print(" DEC1=");
+      Serial.print((int)decoded);
+      Serial.print(" CAND1=");
+      Serial.print((int)set1_candidate_btn);
+      Serial.print(" CNT1=");
+      Serial.print((int)set1_candidate_cnt);
       Serial.print(" ST1=");
       Serial.print((int)set1_stable_btn);
-      Serial.print(" ST2=");
-      Serial.print(-1);
+      Serial.print(" LCK(ms)=");
+      if (now < set1_lockout_until_ms) {
+        Serial.print((unsigned long)(set1_lockout_until_ms - now));
+      } else {
+        Serial.print(0UL);
+      }
+    }
+
+    /* Event debug: print immediately when decoded/stable changes */
+    static char prev_decoded = 127;
+    static char prev_stable = 127;
+    if (decoded != prev_decoded || set1_stable_btn != prev_stable) {
+      prev_decoded = decoded;
+      prev_stable = set1_stable_btn;
+      const unsigned char src_idx = (set1_stable_btn >= 0) ? (unsigned char)(set1_base_idx + (unsigned char)set1_stable_btn) : 255;
+      const char joy_id = (src_idx != 255) ? joystick_btn_from_src(src_idx) : -1;
+      Serial.println("");
+      Serial.print("EVT t=");
+      Serial.print(now);
+      Serial.print(" adc_raw=");
+      Serial.print(adc_set1);
+      Serial.print(" adc_avg=");
+      Serial.print((unsigned int)dev_value[3]);
+      Serial.print(" dec=");
+      Serial.print((int)decoded);
+      Serial.print(" st=");
+      Serial.print((int)set1_stable_btn);
+      Serial.print(" src=");
+      Serial.print((src_idx == 255) ? -1 : (int)src_idx);
+      Serial.print(" joy=");
+      Serial.print((int)joy_id);
     }
 #endif
   }
@@ -409,10 +535,17 @@ void btn_tick() {
     if ( btn_digital_prev[cnt] != btn_digital[cnt] ) {
       /* value change */
       Serial.println("");
-      Serial.print("Btn");
+      Serial.print("SrcBtn");
       Serial.print(cnt);
       Serial.print(" = ");
       Serial.print( btn_digital[cnt] );
+      /* For human sanity: show which joystick button ID this source maps to (if any). */
+      char joy_id = joystick_btn_from_src((unsigned char)cnt);
+      if (joy_id >= 0) {
+        Serial.print(" (JoyBtn ");
+        Serial.print((int)joy_id);
+        Serial.print(")");
+      }
     }
 #endif
     btn_digital_prev[cnt] = btn_digital[cnt];
