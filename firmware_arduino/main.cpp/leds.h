@@ -17,10 +17,10 @@
   #define WIRED_LEDS 24
 
   /* RGB multiplex timings (ms) */
-  #define RGB_RED_ON_MS   10
-  #define RGB_GREEN_ON_MS 9
-  #define RGB_BLUE_ON_MS  11
-  #define RGB_OFF_MS      5
+  #define RGB_RED_ON_MS   4
+  #define RGB_GREEN_ON_MS 3
+  #define RGB_BLUE_ON_MS  4
+  #define RGB_OFF_MS      0
 
   #define OFF 0
   #define RED 1
@@ -58,5 +58,6 @@
   void led_scan_update( unsigned char led_num );
   void led_scan_update_color( unsigned char color );
   void led_tick( );
+  void led_isr_tick_512us( );
   
 #endif

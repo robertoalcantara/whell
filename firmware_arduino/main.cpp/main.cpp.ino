@@ -18,6 +18,9 @@ Joystick_ Joystick;
 
 volatile T_GLOBAL_TIMER global_timer;
 
+/* Set to 0 to disable inputs/joystick processing while validating LED timing */
+#define ENABLE_INPUTS 1
+
 void setup() {
 
   DDRB = B00001110; 
@@ -75,6 +78,9 @@ ISR(TIMER1_COMPA_vect) {
       }        
     }
   }  
+
+  /* Keep LED multiplex stable regardless of loop load */
+  led_isr_tick_512us();
 }
 
 
@@ -195,7 +201,7 @@ char btn_analog2digital( unsigned int value ) {
 #define BTN_DIGITAL_NUM QTD_DIGITAL_INPUT + 3*QTD_DIGITAL_POS_SWITCH + QTD_ANALOG_BTN_SET1 + QTD_ANALOG_BTN_SET2
 #define JOY_BTN_MAX 32
 #define SERIAL_BUF_LEN 32
-#define DEBUG_BTN_LOG 1
+#define DEBUG_BTN_LOG 0
 
 /* Analog button sets filtering */
 #define ANALOG_SET_DEBOUNCE_SAMPLES 3   /* 3 * 10ms = 30ms */
@@ -423,15 +429,15 @@ void loop() {
   serial_led_tick(); /* handle SimHub serial commands for LEDs */
 
  /* ** */
+#if ENABLE_INPUTS
   if ( 1 == global_timer.flags.flag.on512us ) {
     analog_tick();
   }
+#endif
 
-  /* LED scan at 1kHz (1ms tick) for stable RGB multiplex timing */
-  if ( 1 == global_timer.flags.flag.on1ms ) {
-    led_tick();
-  }
+  /* LEDs are refreshed in the Timer1 ISR */
 
+#if ENABLE_INPUTS
   if ( 1 == global_timer.flags.flag.on1ms ) {
     encoder_tick();
   }
@@ -439,6 +445,7 @@ void loop() {
   if ( 1 == global_timer.flags.flag.on10ms ) {
     btn_tick();
   }
+#endif
 
   global_timer.flags.all = 0;
   while ( global_timer.flags.flag.on512us == 0 ) { /* just wait dude ! */ }

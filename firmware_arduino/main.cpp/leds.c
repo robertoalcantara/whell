@@ -108,9 +108,10 @@ void led_tick( ) {
   static unsigned char prev_mask = 0;
   static unsigned char phase_len = 0;
   static unsigned char phase_idx = 0;
-  static unsigned char elapsed = 0; /* ms elapsed in current phase */
   static unsigned char phase_color[6];
   static unsigned char phase_dur[6];
+  static unsigned char remaining_ms = 0;
+  static unsigned long last_ms = 0;
 
   /* If nothing is enabled, keep everything OFF (don't cycle RGB phases) */
   boolean any_enabled = false;
@@ -124,7 +125,8 @@ void led_tick( ) {
     prev_mask = 0;
     phase_len = 0;
     phase_idx = 0;
-    elapsed = 0;
+    remaining_ms = 0;
+    last_ms = 0;
     led_scan_update_color(OFF);
     return;
   }
@@ -148,7 +150,8 @@ void led_tick( ) {
     prev_mask = mask;
     phase_len = 0;
     phase_idx = 0;
-    elapsed = 0;
+    remaining_ms = 0;
+    last_ms = 0;
 
     /* Single channel: keep it ON continuously (no OFF gaps) */
     if (mask == 0x01) {
@@ -161,31 +164,162 @@ void led_tick( ) {
       phase_color[0] = BLUE;  phase_dur[0] = 255;
       phase_len = 1;
     } else {
-      /* Multi-channel: apply OFF gap between active channels */
-      if (mask & 0x01) { phase_color[phase_len] = RED;   phase_dur[phase_len++] = RGB_RED_ON_MS;   phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
-      if (mask & 0x02) { phase_color[phase_len] = GREEN; phase_dur[phase_len++] = RGB_GREEN_ON_MS; phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
-      if (mask & 0x04) { phase_color[phase_len] = BLUE;  phase_dur[phase_len++] = RGB_BLUE_ON_MS;  phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
+      /* Multi-channel: optional OFF gap between active channels */
+      if (mask & 0x01) {
+        phase_color[phase_len] = RED;   phase_dur[phase_len++] = RGB_RED_ON_MS;
+        if (RGB_OFF_MS > 0) { phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
+      }
+      if (mask & 0x02) {
+        phase_color[phase_len] = GREEN; phase_dur[phase_len++] = RGB_GREEN_ON_MS;
+        if (RGB_OFF_MS > 0) { phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
+      }
+      if (mask & 0x04) {
+        phase_color[phase_len] = BLUE;  phase_dur[phase_len++] = RGB_BLUE_ON_MS;
+        if (RGB_OFF_MS > 0) { phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
+      }
     }
 
     led_scan_update_color(phase_color[0]);
     return;
   }
 
-  /* Advance time in current phase */
-  unsigned char dur = phase_dur[phase_idx];
-  if (dur != 255) {
-    if (elapsed < (unsigned char)(dur - 1)) {
-      elapsed++;
+  /* Time-based scheduling (millis): avoids stretching if loop misses ticks */
+  unsigned long now = millis();
+  if (last_ms == 0) {
+    last_ms = now;
+    return;
+  }
+  unsigned long dt = now - last_ms;
+  if (dt == 0) return;
+  last_ms = now;
+
+  while (dt > 0) {
+    unsigned char dur = phase_dur[phase_idx];
+    if (dur == 255) {
+      /* continuous */
+      remaining_ms = 255;
       return;
     }
-    elapsed = 0;
+
+    if (remaining_ms == 0) {
+      remaining_ms = dur;
+    }
+
+    if (dt < remaining_ms) {
+      remaining_ms -= (unsigned char)dt;
+      return;
+    }
+
+    dt -= remaining_ms;
+    remaining_ms = 0;
+
+    /* Next phase */
+    phase_idx++;
+    if (phase_idx >= phase_len) phase_idx = 0;
+    led_scan_update_color(phase_color[phase_idx]);
+  }
+
+}
+
+/* Run LED refresh from Timer1 ISR (called every 512us). Keeps multiplex stable even when loop is busy. */
+void led_isr_tick_512us( ) {
+  static unsigned char half_ms = 0;   /* 0/1 -> 1ms gate */
+  static unsigned char prev_mask = 0;
+  static unsigned char phase_len = 0;
+  static unsigned char phase_idx = 0;
+  static unsigned char phase_color[6];
+  static unsigned char phase_dur[6];
+  static unsigned char remaining = 0; /* ms remaining in current phase (excluding current ms) */
+  static unsigned char current = OFF;
+
+  /* Refresh output every 512us (reduces visible flicker) */
+  led_scan_update_color(current);
+
+  /* Advance the phase timing every 1ms */
+  half_ms ^= 1;
+  if (half_ms) return;
+
+  /* Build channel mask (bit0=R, bit1=G, bit2=B) based on enabled LEDs/colors */
+  unsigned char mask = 0;
+  for (unsigned char i = 0; i < WIRED_LEDS; i++) {
+    if (!leds[i].enabled) continue;
+    unsigned char c = leds[i].color;
+    if (c == RED || c == YELLOW || c == PURPLE) mask |= 0x01;
+    if (c == GREEN || c == YELLOW || c == CYAN) mask |= 0x02;
+    if (c == BLUE || c == PURPLE || c == CYAN) mask |= 0x04;
+  }
+
+  if (mask == 0) {
+    prev_mask = 0;
+    phase_len = 0;
+    phase_idx = 0;
+    remaining = 0;
+    current = OFF;
+    return;
+  }
+
+  /* If mask changed, rebuild the phase list */
+  if (mask != prev_mask) {
+    prev_mask = mask;
+    phase_len = 0;
+    phase_idx = 0;
+    remaining = 0;
+
+    /* Single channel: keep it ON continuously (no OFF gaps) */
+    if (mask == 0x01) {
+      phase_color[0] = RED;   phase_dur[0] = 255;
+      phase_len = 1;
+    } else if (mask == 0x02) {
+      phase_color[0] = GREEN; phase_dur[0] = 255;
+      phase_len = 1;
+    } else if (mask == 0x04) {
+      phase_color[0] = BLUE;  phase_dur[0] = 255;
+      phase_len = 1;
+    } else {
+      if (mask & 0x01) {
+        phase_color[phase_len] = RED;   phase_dur[phase_len++] = RGB_RED_ON_MS;
+        if (RGB_OFF_MS > 0) { phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
+      }
+      if (mask & 0x02) {
+        phase_color[phase_len] = GREEN; phase_dur[phase_len++] = RGB_GREEN_ON_MS;
+        if (RGB_OFF_MS > 0) { phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
+      }
+      if (mask & 0x04) {
+        phase_color[phase_len] = BLUE;  phase_dur[phase_len++] = RGB_BLUE_ON_MS;
+        if (RGB_OFF_MS > 0) { phase_color[phase_len] = OFF; phase_dur[phase_len++] = RGB_OFF_MS; }
+      }
+    }
+
+    current = phase_color[0];
+    if (phase_dur[0] != 255 && phase_dur[0] > 0) {
+      remaining = (unsigned char)(phase_dur[0] - 1);
+    } else {
+      remaining = 0;
+    }
+    return;
+  }
+
+  /* Continuous single-channel */
+  if (phase_len == 1 && phase_dur[0] == 255) {
+    current = phase_color[0];
+    return;
+  }
+
+  if (remaining > 0) {
+    remaining--;
+    return;
   }
 
   /* Next phase */
   phase_idx++;
   if (phase_idx >= phase_len) phase_idx = 0;
-  led_scan_update_color(phase_color[phase_idx]);
+  current = phase_color[phase_idx];
 
+  if (phase_dur[phase_idx] != 255 && phase_dur[phase_idx] > 0) {
+    remaining = (unsigned char)(phase_dur[phase_idx] - 1);
+  } else {
+    remaining = 0;
+  }
 }
 
 void led_scan_update_color( unsigned char color ) {
