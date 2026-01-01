@@ -14,10 +14,14 @@
    *  STCP - RCLK - storage register clock
    */
   #define NUM_LEDS 24 //20 wired, 24 shift outputs
-  #define WIRED_LEDS 20
+  #define WIRED_LEDS 24
 
-  /* Multiplex dwell time: keep the selected LED latched for this long before moving on. */
-  #define LED_DWELL_MS 5
+  /* RGB multiplex timings (ms) */
+  #define RGB_RED_ON_MS   10
+  #define RGB_GREEN_ON_MS 9
+  #define RGB_BLUE_ON_MS  11
+  #define RGB_OFF_MS      5
+
   #define OFF 0
   #define RED 1
   #define GREEN 2

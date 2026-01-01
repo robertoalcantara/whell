@@ -275,12 +275,14 @@ void process_serial_line(char *line) {
       leds[i].enabled = false;
     }
     led_serial_override = true;
+    led_scan_update_color(OFF); /* clear immediately */
   } else if (line[0] == 'D') {
     led_serial_override = false;
     /* demo removed: use D as a safe "stop/clear" */
     for (unsigned char i = 0; i < NUM_LEDS; i++) {
       leds[i].enabled = false;
     }
+    led_scan_update_color(OFF); /* clear immediately */
   }
 }
 
@@ -425,7 +427,7 @@ void loop() {
     analog_tick();
   }
 
-  /* LED scan at 1kHz (dwell handled inside led_tick) */
+  /* LED scan at 1kHz (1ms tick) for stable RGB multiplex timing */
   if ( 1 == global_timer.flags.flag.on1ms ) {
     led_tick();
   }
